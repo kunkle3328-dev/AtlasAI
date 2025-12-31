@@ -1,0 +1,7 @@
+{
+  "name": "Atlas Desk",
+  "description": "A voice-first learning and personal knowledge assistant. Teaches from your sources with natural conversation and structured sessions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
