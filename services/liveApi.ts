@@ -1,4 +1,4 @@
-import { GoogleGenAI, LiveServerMessage, FunctionDeclaration, Type } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, FunctionDeclaration, Modality, Type } from '@google/genai';
 import { ResolvedVoiceConfig } from '../utils/voiceEngine';
 import { SearchResult } from '../types';
 
@@ -102,18 +102,22 @@ export class LiveClient {
       });
 
       // 2. Build Config
-      const tools = enableSearch ? [{ functionDeclarations: [searchToolDeclaration] }] : [];
       const finalInstruction = `User: ${userName}.\n${baseSystemInstruction}\nVOICE: ${voiceConfig.systemInstruction}`;
+      
+      const config: any = {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: voiceConfig.speechConfig,
+        systemInstruction: { parts: [{ text: finalInstruction }] },
+      };
+
+      if (enableSearch) {
+        config.tools = [{ functionDeclarations: [searchToolDeclaration] }];
+      }
 
       // 3. Connect Live Session
       this.connectionPromise = this.ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: voiceConfig.speechConfig,
-          systemInstruction: finalInstruction,
-          tools: tools,
-        },
+        config: config,
         callbacks: {
           onopen: () => {
             console.log('LiveClient: Open');
@@ -125,9 +129,10 @@ export class LiveClient {
              console.log('LiveClient: Close');
              if (this._state !== 'idle') this.attemptReconnect();
           },
-          onerror: (err) => {
+          onerror: (err: any) => {
              console.error('LiveClient: Error', err);
-             this.onError(err.message || "Connection error");
+             const msg = err.message || (err.error && err.error.message) || "Network error";
+             this.onError(msg);
              this.attemptReconnect();
           }
         }
@@ -138,7 +143,7 @@ export class LiveClient {
     } catch (e: any) {
       console.error(e);
       this.setState('idle');
-      this.onError(e.message);
+      this.onError(e.message || "Connection failed");
     }
   }
 
@@ -257,7 +262,6 @@ export class LiveClient {
     // 3. Handle Turn Complete
     if (message.serverContent?.turnComplete) {
         // Wait for audio queue to drain before switching back to listening
-        // Note: The audio queue onended handler handles the state switch
     }
   }
 
@@ -306,9 +310,7 @@ export class LiveClient {
      this.setState('reconnecting');
      setTimeout(() => {
          console.log("Reconnecting...");
-         // Simple reconnect logic: disconnect -> connect (caller handles this usually)
          this.onError("Connection dropped. Reconnecting...");
-         // In a real app, we would trigger the connect flow again automatically
      }, 2000);
   }
 }

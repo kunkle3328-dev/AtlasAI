@@ -7,7 +7,7 @@ import { LiveClient, LiveState } from './services/liveApi';
 import { db } from './utils/store';
 import { retrieveContext, processFile } from './utils/rag';
 import { resolveVoiceSettings, INTELLIGENCE_MODES } from './utils/voiceEngine';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Modality } from '@google/genai';
 
 // --- COMPONENTS ---
 
@@ -34,7 +34,7 @@ const CommandBar: React.FC<{ isOpen: boolean; onClose: () => void; onAction: (ac
         </div>
         <div className="p-2">
            <div className="text-xs font-medium text-gray-500 px-2 py-2">SUGGESTED ACTIONS</div>
-           {[{ id: 'talk', icon: Icons.Mic, label: 'Start Voice Session' }, { id: 'library', icon: Icons.Add, label: 'Upload New Source' }, { id: 'learn', icon: Icons.Learn, label: 'New Teach Session' }, { id: 'exports', icon: Icons.Exports, label: 'View Exports' }, { id: 'tuning', icon: Icons.Tuning, label: 'Open Voice Lab' }].map(action => (
+           {[{ id: 'talk', icon: Icons.Mic, label: 'Start Voice Session' }, { id: 'library', icon: Icons.Add, label: 'Upload New Source' }, { id: 'learn', icon: Icons.Learn, label: 'New Teach Session' }, { id: 'exports', icon: Icons.Exports, label: 'View Exports' }, { id: 'tuning', icon: Icons.Tuning, label: 'Open Voice Lab' }, { id: 'settings', icon: Icons.Settings, label: 'Settings & Profile' }].map(action => (
              <button key={action.id} onClick={() => { onAction(action.id); onClose(); }} className="w-full text-left flex items-center gap-3 px-3 py-3 hover:bg-white/5 rounded-lg group transition-colors">
                 <div className="p-1.5 rounded bg-gray-800 group-hover:bg-atlas-600/20 text-gray-400 group-hover:text-atlas-400 transition-colors"><action.icon className="w-4 h-4" /></div>
                 <span className="text-gray-300 group-hover:text-white">{action.label}</span>
@@ -46,9 +46,64 @@ const CommandBar: React.FC<{ isOpen: boolean; onClose: () => void; onAction: (ac
   );
 };
 
-// ... (LibraryPage, ExportsPage, LearnPage components remain mostly same, simplified for brevity here to focus on TalkPage changes)
-// Assuming LibraryPage, ExportsPage, LearnPage are kept as is from previous version or minimal updates.
-// I will include them to ensure full file integrity.
+const SettingsPage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
+    const [name, setName] = useState(db.getSettings().userName);
+    const [saved, setSaved] = useState(false);
+
+    const save = () => {
+        db.updateSettings({ userName: name });
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+    };
+
+    return (
+        <div className="p-6 pb-24 max-w-2xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4">
+             <div className="flex items-center gap-4">
+                 <button onClick={onBack} className="p-2 rounded-full hover:bg-white/10 transition-colors"><Icons.ArrowLeft className="w-6 h-6 text-gray-400 hover:text-white" /></button>
+                 <h2 className="text-3xl font-light text-white tracking-tight">Settings</h2>
+             </div>
+             
+             <div className="glass-card p-6 rounded-2xl space-y-4">
+                <div className="flex items-center gap-4 mb-2">
+                    <div className="w-12 h-12 rounded-full bg-atlas-600 flex items-center justify-center text-xl font-bold text-white">
+                        {name.charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                        <h3 className="text-lg font-medium text-white">Personalization</h3>
+                        <p className="text-sm text-gray-400">How Atlas addresses you</p>
+                    </div>
+                </div>
+
+                <div className="space-y-1">
+                    <label className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Display Name</label>
+                    <input 
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-xl p-4 text-white text-lg focus:border-atlas-500 outline-none transition-colors"
+                        placeholder="Enter your name..."
+                    />
+                </div>
+                
+                <div className="pt-2">
+                    <button 
+                        onClick={save} 
+                        className={`w-full py-3 rounded-xl font-medium transition-all ${saved ? 'bg-green-500 text-white' : 'bg-white text-black hover:bg-gray-200'}`}
+                    >
+                        {saved ? 'Saved!' : 'Save Changes'}
+                    </button>
+                </div>
+             </div>
+
+             <div className="glass-panel p-6 rounded-2xl">
+                 <h3 className="text-lg font-medium text-white mb-2">About Atlas Desk</h3>
+                 <p className="text-sm text-gray-400 leading-relaxed">
+                     Atlas Desk is a voice-first knowledge assistant designed to help you learn and create using your own sources. 
+                     Powered by Gemini Multimodal Live API.
+                 </p>
+             </div>
+        </div>
+    );
+};
 
 const LibraryPage: React.FC<{ sources: Source[], refresh: () => void }> = ({ sources, refresh }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -57,6 +112,138 @@ const LibraryPage: React.FC<{ sources: Source[], refresh: () => void }> = ({ sou
   const [inputText, setInputText] = useState('');
   const [inputUrl, setInputUrl] = useState('');
   const [searchTopic, setSearchTopic] = useState('');
+
+  // Audio Playback State
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (audioCtxRef.current) audioCtxRef.current.close();
+    };
+  }, []);
+
+  const stopAudio = () => {
+    if (sourceNodeRef.current) {
+        try { sourceNodeRef.current.stop(); } catch (e) {}
+    }
+    if (audioCtxRef.current) {
+        audioCtxRef.current.close();
+        audioCtxRef.current = null;
+    }
+    setPlayingId(null);
+  };
+
+  const playOverview = async (source: Source) => {
+    if (playingId === source.id) {
+        stopAudio();
+        return;
+    }
+    stopAudio(); // Stop any other playing audio
+
+    setGeneratingId(source.id);
+    try {
+        if (!process.env.API_KEY) throw new Error("API Key missing");
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        let script = "";
+
+        // 1. Generate Script (Summary) with Fallback
+        try {
+            const scriptPrompt = `
+              Task: Create a concise, engaging audio overview script (approx 45 seconds spoken) for this content.
+              Content Title: ${source.title}
+              Content Preview: ${source.content.substring(0, 8000)}
+              
+              Format: Just the spoken text. No scene directions. Natural, conversational tone.
+            `;
+            const scriptRes = await ai.models.generateContent({
+              model: 'gemini-3-flash-preview',
+              contents: scriptPrompt,
+            });
+            script = scriptRes.text || "";
+        } catch (scriptError: any) {
+            console.warn("Script generation failed, falling back to raw content.", scriptError);
+            const rawContent = source.summary || source.content.substring(0, 800);
+            script = `Here is an overview of ${source.title}. ${rawContent}`;
+        }
+
+        if (!script) throw new Error("No script available");
+
+        // 2. Generate Audio (TTS)
+        const activeProfile = db.getActiveProfile();
+        // Map profile warmth to a compatible voice
+        const voiceName = activeProfile.warmth > 0.6 ? 'Kore' : activeProfile.directness > 0.6 ? 'Fenrir' : 'Puck';
+
+        try {
+            const ttsRes = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-preview-tts',
+                contents: [{ parts: [{ text: script }] }],
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName } }
+                    }
+                }
+            });
+
+            const base64Audio = ttsRes.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (!base64Audio) throw new Error("Failed to generate audio output");
+
+            // 3. Decode & Play (PCM 24kHz)
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            audioCtxRef.current = ctx;
+
+            // Base64 -> Uint8Array
+            const binaryString = atob(base64Audio);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+
+            // Int16 PCM -> Float32
+            const float32 = new Float32Array(bytes.length / 2);
+            const view = new DataView(bytes.buffer);
+            for (let i = 0; i < float32.length; i++) {
+                float32[i] = view.getInt16(i * 2, true) / 32768.0;
+            }
+
+            const buffer = ctx.createBuffer(1, float32.length, 24000);
+            buffer.getChannelData(0).set(float32);
+
+            const node = ctx.createBufferSource();
+            node.buffer = buffer;
+            node.connect(ctx.destination);
+            node.start();
+            sourceNodeRef.current = node;
+            
+            setPlayingId(source.id);
+            
+            node.onended = () => {
+                setPlayingId(null);
+                ctx.close();
+                audioCtxRef.current = null;
+            };
+        } catch (ttsError: any) {
+             // Handle Quota Error specifically for TTS
+             if (JSON.stringify(ttsError).includes("429") || ttsError?.status === 429 || ttsError?.message?.includes('quota')) {
+                 alert("Voice generation limit reached. Please wait a moment or try again later.");
+             } else {
+                 throw ttsError;
+             }
+        }
+
+    } catch (e: any) {
+        if (JSON.stringify(e).includes("429") || e.status === 429) {
+            alert("Rate limit reached. Please wait.");
+            return;
+        }
+        console.error("Audio Overview Error", e);
+        alert("Could not generate audio overview.");
+    } finally {
+        setGeneratingId(null);
+    }
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -153,10 +340,34 @@ const LibraryPage: React.FC<{ sources: Source[], refresh: () => void }> = ({ sou
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {sources.length === 0 && <div className="col-span-full py-12 text-center border border-dashed border-white/10 rounded-2xl"><p className="text-gray-500">No sources yet.</p></div>}
         {sources.map(s => (
-          <div key={s.id} className="glass-card p-5 rounded-2xl hover:bg-white/5 transition-colors group relative overflow-hidden">
+          <div key={s.id} className={`glass-card p-5 rounded-2xl hover:bg-white/5 transition-colors group relative overflow-hidden ${playingId === s.id ? 'ring-1 ring-atlas-500 bg-atlas-500/5' : ''}`}>
             <div className="flex justify-between items-start mb-3">
               <span className={`text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded border ${s.type === 'pdf' ? 'border-red-500/30 text-red-400' : s.type === 'discovery' ? 'border-purple-500/30 text-purple-400' : 'border-blue-500/30 text-blue-400'}`}>{s.type}</span>
-              <button onClick={() => { db.deleteSource(s.id); refresh(); }} className="text-gray-600 hover:text-red-400 transition-colors"><Icons.Stop className="w-4 h-4" /></button>
+              <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => playOverview(s)}
+                    disabled={generatingId === s.id}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium transition-colors ${playingId === s.id ? 'bg-atlas-500 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/20'}`}
+                  >
+                      {generatingId === s.id ? (
+                          <>
+                           <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                           Generating...
+                          </>
+                      ) : playingId === s.id ? (
+                          <>
+                           <Icons.Stop className="w-3 h-3 fill-current" />
+                           Stop
+                          </>
+                      ) : (
+                          <>
+                           <Icons.Play className="w-3 h-3 fill-current" />
+                           Overview
+                          </>
+                      )}
+                  </button>
+                  <button onClick={() => { db.deleteSource(s.id); refresh(); }} className="text-gray-600 hover:text-red-400 transition-colors"><Icons.Stop className="w-4 h-4" /></button>
+              </div>
             </div>
             <h3 className="text-lg font-medium text-gray-200 group-hover:text-white transition-colors line-clamp-1">{s.title}</h3>
             <p className="text-sm text-gray-400 mt-2 line-clamp-3 leading-relaxed">{s.content}</p>
@@ -204,11 +415,18 @@ const LearnPage: React.FC<{ sources: Source[], refreshExports: () => void }> = (
         setStep('generating');
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash-preview' });
             const context = retrieveContext(sources, config.goal, 5);
             const prompt = `Create a structured lesson plan for: "${config.goal}". Difficulty: ${config.difficulty}. Context: ${context}. Return JSON: { "goal": string, "difficulty": string, "steps": [{ "title": string, "description": string, "keyPoints": string[] }] }`;
-            const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }], config: { responseMimeType: 'application/json' } });
-            const json = JSON.parse(result.response.text());
+            
+            const result = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                config: { responseMimeType: 'application/json' }
+            });
+            const text = result.text;
+            if (!text) throw new Error("No plan generated");
+            const json = JSON.parse(text);
+            
             setPlan(json);
             setStep('session');
             await teachStep(0, json);
@@ -220,13 +438,17 @@ const LearnPage: React.FC<{ sources: Source[], refreshExports: () => void }> = (
         try {
             const stepData = currentPlan.steps[index];
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash-preview' });
             const context = retrieveContext(sources, stepData.title, 3);
             const activeProfile = db.getActiveProfile();
             const resolvedVoice = resolveVoiceSettings(activeProfile);
             const prompt = `You are a teacher. Teach this step: "${stepData.title}". Description: ${stepData.description}. Context: ${context}. TONE: ${resolvedVoice.systemInstruction}. Format Markdown.`;
-            const result = await model.generateContent(prompt);
-            const shapedText = resolvedVoice.scriptTransforms(result.response.text());
+            
+            const result = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: prompt
+            });
+            const shapedText = resolvedVoice.scriptTransforms(result.text || '');
+            
             setAiResponse(shapedText);
         } finally { setIsThinking(false); }
     };
@@ -270,7 +492,6 @@ const LearnPage: React.FC<{ sources: Source[], refreshExports: () => void }> = (
     );
 };
 
-// 5. TALK PAGE (Updated)
 const TalkPage: React.FC<{ sources: Source[] }> = ({ sources }) => {
     const [connected, setConnected] = useState(false);
     const [state, setState] = useState<LiveState>('idle');
@@ -307,7 +528,8 @@ const TalkPage: React.FC<{ sources: Source[] }> = ({ sources }) => {
         const activeProfile = db.getActiveProfile();
         newClient.setBargeInSensitivity(activeProfile.bargeInSensitivity || 0.5);
 
-        const topContext = retrieveContext(sources, "overview", 5); 
+        // REDUCE CONTEXT LIMIT TO AVOID CONNECTION ERRORS
+        const topContext = retrieveContext(sources, "overview", 2); 
         const resolvedVoice = resolveVoiceSettings(activeProfile, mode);
         const userName = db.getSettings().userName;
 
@@ -421,7 +643,6 @@ const TalkPage: React.FC<{ sources: Source[] }> = ({ sources }) => {
     );
 };
 
-// ... (Rest of App component logic remains same)
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('talk');
   const [sources, setSources] = useState<Source[]>(db.getSources());
@@ -434,14 +655,17 @@ export default function App() {
   }, []);
 
   const refreshData = () => { setSources(db.getSources()); setExports(db.getExports()); };
-  const handleCommandAction = (actionId: string) => { if (['talk', 'library', 'learn', 'exports', 'tuning'].includes(actionId)) { setActiveTab(actionId as NavTab); } };
+  const handleCommandAction = (actionId: string) => { if (['talk', 'library', 'learn', 'exports', 'tuning', 'settings'].includes(actionId)) { setActiveTab(actionId as NavTab); } };
 
   return (
     <div className="min-h-screen bg-gray-950 text-white font-sans selection:bg-atlas-500/30">
       <CommandBar isOpen={isCommandBarOpen} onClose={() => setIsCommandBarOpen(false)} onAction={handleCommandAction} />
       <div className="fixed top-0 left-0 right-0 h-16 glass-panel z-40 flex items-center justify-between px-6">
         <div className="flex items-center gap-3"><div className="w-8 h-8 bg-gradient-to-br from-white to-gray-400 rounded-lg flex items-center justify-center shadow-lg"><span className="text-black font-bold text-lg">A</span></div><span className="font-semibold tracking-wide text-lg hidden sm:block">Atlas Desk</span></div>
-        <button onClick={() => setIsCommandBarOpen(true)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-xs text-gray-400 transition-colors"><Icons.Search className="w-3.5 h-3.5" /><span>Search</span><span className="ml-2 px-1 rounded bg-white/10">⌘K</span></button>
+        <div className="flex items-center gap-3">
+             <button onClick={() => setIsCommandBarOpen(true)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-xs text-gray-400 transition-colors"><Icons.Search className="w-3.5 h-3.5" /><span>Search</span><span className="ml-2 px-1 rounded bg-white/10">⌘K</span></button>
+             <button onClick={() => setActiveTab('settings')} className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"><Icons.User className="w-4 h-4 text-gray-300" /></button>
+        </div>
       </div>
       <main className="pt-16 pb-24 min-h-screen relative">
         {activeTab === 'talk' && <TalkPage sources={sources} />}
@@ -449,7 +673,7 @@ export default function App() {
         {activeTab === 'learn' && <LearnPage sources={sources} refreshExports={refreshData} />}
         {activeTab === 'exports' && <ExportsPage exports={exports} refresh={refreshData} />}
         {activeTab === 'tuning' && <VoiceLab />}
-        {activeTab === 'settings' && <div className="p-10 text-center text-gray-500">Settings Implementation Placeholder</div>}
+        {activeTab === 'settings' && <SettingsPage onBack={() => setActiveTab('talk')} />}
       </main>
       <div className="fixed bottom-0 left-0 right-0 glass-panel border-t border-white/5 pb-safe z-40">
         <div className="flex justify-around items-center h-20 px-2 max-w-md mx-auto">
